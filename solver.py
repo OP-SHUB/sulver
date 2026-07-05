@@ -203,8 +203,6 @@ REFERER = "https://mtacc.mobilelegends.com/"
 ID = "fef5c67c39074e9d845f4bf579cc07af"
 FP_H = "mtacc.mobilelegends.com"
 
-PROXY = os.environ.get('PROXY', 'http://262ceb93fc50f42b5029__cr.gb,us,vn,br:56c174ad8eb0f6c2@gw.dataimpulse.com:823')
-
 __SBOX__ = "a7be3f3933fa8c5fcf86c4b6908b569ba1e26c1a6d7cfbf60ae4b00e074a194dac4b73e7f898541159a39d08183b76eedee3ed341e6685d2357440158394b1ff03a9004cbbb5ca7dcb7f41489a16e03dcc9c71eb3c9796685b1d01b4d56193a6e1f1a2470445c191ae49c5d82765dc82c350f263387a24a502fcbf442e2dddaad0e936d9ea22b89275307b42518fbc3a626ba806d4ecd6d725f50cc8c72fefa4551ccd6fc9b2b7ab954f815c7264c6e51f4eaf99885a79892b1b60a0b3526e57ba5d178d370958847eb9fd28f9ce0bc023f4148a2adfe632126769057043d3bd8eda0df7872629f3809ef05310e83113216afe202c460fc23e789f77d1addb5e"
 __SEED_KEY__ = "fd6a43ae25f74398b61c03c83be37449"
 __ROUND_KEY__ = "037606da0296055c"
@@ -890,8 +888,6 @@ class Dun163:
 
     def set_session(self):
         session = requests.Session()
-        if PROXY:
-            session.proxies = {"http": PROXY, "https": PROXY}
         domain_host = self.domain.replace('https://', '').replace('http://', '')
         session.headers.update({
             "Accept": "*/*",
@@ -1032,8 +1028,7 @@ class Dun163:
     def handle_click_captcha_hybrid(self, bg_url, token):
         try:
             headers = {"User-Agent": self.request_params['ua']}
-            proxies = {"http": PROXY, "https": PROXY} if PROXY else None
-            resp = requests.get(bg_url, headers=headers, proxies=proxies, timeout=3)
+            resp = requests.get(bg_url, headers=headers, timeout=3)
             resp.raise_for_status()
             image_data = resp.content
             img_start_time = time.time()
@@ -1095,12 +1090,11 @@ class Dun163:
     def handle_slider_captcha(self, bg_url, front_url, token):
         try:
             headers = {"User-Agent": self.request_params['ua']}
-            proxies = {"http": PROXY, "https": PROXY} if PROXY else None
-            resp_bg = requests.get(bg_url, headers=headers, proxies=proxies, timeout=3)
+            resp_bg = requests.get(bg_url, headers=headers, timeout=3)
             resp_bg.raise_for_status()
             bg_array = np.frombuffer(resp_bg.content, dtype=np.uint8)
             bg = cv2.imdecode(bg_array, cv2.IMREAD_COLOR)
-            resp_front = requests.get(front_url, headers=headers, proxies=proxies, timeout=3)
+            resp_front = requests.get(front_url, headers=headers, timeout=3)
             resp_front.raise_for_status()
             front_array = np.frombuffer(resp_front.content, dtype=np.uint8)
             front = cv2.imdecode(front_array, cv2.IMREAD_UNCHANGED)
