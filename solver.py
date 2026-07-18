@@ -1225,7 +1225,7 @@ def main():
         'UA': UserAgent().random,
         'DOMAIN': DUN163_DOMAINS[0]
     }
-    NUM_THREADS = int(input("Number of threads: ").strip())
+    NUM_THREADS = int(os.getenv("THREADS", "10"))
     logger.info(f"Starting {NUM_THREADS} worker threads")
     logger.info(f"ID: {ID}")
     logger.info(f"REFERER: {REFERER}")
